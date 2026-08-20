@@ -1,0 +1,13 @@
+numpy
+pandas
+geopandas
+shapely
+pyproj
+rasterio
+rioxarray
+xarray
+matplotlib
+jupyter
+pystac-client
+stackstac
+planetary-computer
