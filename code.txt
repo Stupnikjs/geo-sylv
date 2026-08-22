@@ -1,0 +1,242 @@
+import geopandas as gpd
+
+# python -m ipykernel install --user --name geo-sylv --display-name "Python (geo-sylv)"
+
+project = gpd.read_file("data/projects/project_001/geometry.geojson")
+
+# projete en lambert
+project = project.to_crs(epsg=2154)
+
+# area dans l'unité du crs ici m2
+area_ha = project.geometry.area / 10000
+print(area_ha)
+
+project.plot()
+
+# project.geometry.iloc[0] un seul item dans geometry 
+geom = project.geometry.iloc[0]
+
+print(type(geom))
+print(len(geom.geoms))
+
+# chaque polygon de geoms a sa propre area 
+for i, poly in enumerate(geom.geoms):
+    print(i, poly.area / 10_000, "ha")
+
+import matplotlib.pyplot as plt
+from shapely.geometry import Polygon
+
+# Polygon represente un figure qui est fermé par une ligne continue
+
+# on récupère le polygone principal (celui avec l'aire max)
+main_poly = geom.geoms[5]
+
+gpd.GeoSeries([main_poly], crs="EPSG:2154").plot(edgecolor="black")
+plt.title("Zone brûlée principale - Landiras")
+plt.show()
+
+print("Nombre de trous (interiors) :", len(main_poly.interiors))
+
+# surface totale des trous
+from shapely.geometry import Polygon
+
+holes_area = sum(Polygon(ring).area for ring in main_poly.interiors) / 10_000
+print("Surface totale des trous :", holes_area, "ha")
+
+main_poly_filled = Polygon(main_poly.exterior)
+
+print("Aire remplie (sans trous) :", main_poly_filled.area / 10_000, "ha")
+print("Aire originale (avec trous) :", main_poly.area / 10_000, "ha")
+
+# on isole le trou principal (le plus grand)
+hole_areas = [Polygon(ring).area for ring in main_poly.interiors]
+main_hole = Polygon(main_poly.interiors[hole_areas.index(max(hole_areas))])
+
+print("Aire du trou principal :", main_hole.area / 10_000, "ha")
+
+# centroïde en Lambert-93, puis reprojeté en lat/lon pour le lire facilement
+centroid_lambert = gpd.GeoSeries([main_hole.centroid], crs="EPSG:2154")
+centroid_wgs84 = centroid_lambert.to_crs(epsg=4326)
+print("Centroïde (lat/lon) :", centroid_wgs84.iloc[0].y, centroid_wgs84.iloc[0].x)
+
+lat, lon = centroid_wgs84.iloc[0].y, centroid_wgs84.iloc[0].x
+print(f"Google Maps : https://www.google.com/maps?q={lat},{lon}")
+print(f"OpenStreetMap : https://www.openstreetmap.org/?mlat={lat}&mlon={lon}&zoom=15")
+
+import os
+
+clean_gdf = gpd.GeoDataFrame(geometry=[main_poly], crs="EPSG:2154").to_crs(epsg=4326)
+
+out_dir = "data/projects/project_001"
+os.makedirs(out_dir, exist_ok=True)
+clean_gdf.to_file(os.path.join(out_dir, "geometry_clean.geojson"), driver="GeoJSON")
+
+print("Sauvegardé :", os.path.join(out_dir, "geometry_clean.geojson"))
+print("Nouvelle surface :", clean_gdf.to_crs(epsg=2154).geometry.area.sum() / 10_000, "ha")
+
+print("Géométrie valide :", clean_gdf.geometry.is_valid.iloc[0])
+
+bounds = clean_gdf.total_bounds
+print("Bounding box (lon_min, lat_min, lon_max, lat_max) :", bounds)
+
+from shapely.geometry import box
+
+bbox_geom = box(*bounds)
+bbox_gdf = gpd.GeoDataFrame(geometry=[bbox_geom], crs="EPSG:4326").to_crs(epsg=2154)
+bbox_area_ha = bbox_gdf.geometry.area.iloc[0] / 10_000
+
+poly_area_ha = clean_gdf.to_crs(epsg=2154).geometry.area.iloc[0] / 10_000
+
+print("Aire bounding box :", bbox_area_ha, "ha")
+print("Aire polygone réel :", poly_area_ha, "ha")
+print("Ratio bbox/polygone :", bbox_area_ha / poly_area_ha)
+
+import numpy as np
+from shapely.geometry import box as shapely_box
+
+# grille 500m sur la bbox, en Lambert-93
+bbox_metric = bbox_gdf.geometry.iloc[0].bounds
+xmin, ymin, xmax, ymax = bbox_metric
+step = 500
+
+cells = []
+x = xmin
+while x < xmax:
+    y = ymin
+    while y < ymax:
+        cells.append(shapely_box(x, y, x + step, y + step))
+        y += step
+    x += step
+
+cells_gdf = gpd.GeoDataFrame(geometry=cells, crs="EPSG:2154")
+poly_metric = clean_gdf.to_crs(epsg=2154)
+
+intersecting = cells_gdf[cells_gdf.intersects(poly_metric.geometry.iloc[0])]
+
+print("Nombre total de cases (bbox) :", len(cells_gdf))
+print("Nombre de cases intersectant le polygone :", len(intersecting))
+print("Pourcentage utile :", len(intersecting) / len(cells_gdf) * 100, "%")
+
+import requests
+
+resp = requests.get('https://stac.dataspace.copernicus.eu/v1/collections?limit=1000')
+data = resp.json()
+
+
+sentinel_collections = [c["id"] for c in data["collections"] if "sentinel" in c["id"].lower()]
+print(sentinel_collections)
+
+print("Nombre de collections dans cette page :", len(data["collections"]))
+print("Clés disponibles dans la réponse :", data.keys())
+print("Liens :", data.get("links"))
+
+"""
+search = catalog.search(
+    collections=["SENTINEL-2"],
+    bbox=bbox,
+    datetime="2022-07-01/2022-08-31",
+)
+
+
+items = list(search.items())
+print("Nombre de scènes trouvées :", len(items))
+print("Première scène :", items[0].id if items else None)
+"""
+
+from pystac_client import Client
+
+catalog = Client.open("https://catalogue.dataspace.copernicus.eu/stac")
+
+bbox = list(bounds)
+
+search = catalog.search(
+    collections=["sentinel-2-l2a"],
+    bbox=bbox,
+    datetime="2022-07-01/2022-08-31",
+)
+
+items = list(search.items())
+print("Nombre de scènes trouvées :", len(items))
+print("Première scène :", items[0].id if items else None)
+
+
+
+
+for item in items:
+    print(item.id, "-", item.properties.get("eo:cloud_cover"), "% nuages")
+
+threshold = 20
+usable = [item for item in items if item.properties.get("eo:cloud_cover", 100) < threshold]
+
+print(f"Scènes utilisables (<{threshold}% nuages) : {len(usable)} sur {len(items)}")
+for item in sorted(usable, key=lambda i: i.datetime):
+    print(item.id, "-", item.properties.get("eo:cloud_cover"), "%")
+
+pre_fire_id_prefix = "S2A_MSIL2A_20220702"
+post_fire_id_prefix = "S2A_MSIL2A_20220801"
+
+pre_fire_items = [item for item in items if item.id.startswith(pre_fire_id_prefix)]
+post_fire_items = [item for item in items if item.id.startswith(post_fire_id_prefix)]
+
+from shapely.geometry import shape
+
+for item in pre_fire_items:
+    tile_geom = shape(item.geometry)  # geometry native de l'item STAC (déjà en WGS84)
+    tile_gdf = gpd.GeoDataFrame(geometry=[tile_geom], crs="EPSG:4326")
+    
+    # intersection avec ton polygone Landiras
+    intersection = tile_gdf.geometry.iloc[0].intersection(clean_gdf.geometry.iloc[0])
+    
+    # % de la surface du polygone Landiras couvert par cette tuile
+    inter_metric = gpd.GeoSeries([intersection], crs="EPSG:4326").to_crs(epsg=2154)
+    poly_metric = clean_gdf.to_crs(epsg=2154)
+    
+    pct_covered = inter_metric.area.iloc[0] / poly_metric.geometry.area.iloc[0] * 100
+    
+    print(item.id, "-", round(pct_covered, 2), "% du polygone Landiras couvert")
+
+for item in post_fire_items:
+    tile_geom = shape(item.geometry)
+    tile_gdf = gpd.GeoDataFrame(geometry=[tile_geom], crs="EPSG:4326")
+    
+    intersection = tile_gdf.geometry.iloc[0].intersection(clean_gdf.geometry.iloc[0])
+    inter_metric = gpd.GeoSeries([intersection], crs="EPSG:4326").to_crs(epsg=2154)
+    poly_metric = clean_gdf.to_crs(epsg=2154)
+    
+    pct_covered = inter_metric.area.iloc[0] / poly_metric.geometry.area.iloc[0] * 100
+    
+    print(item.id, "-", round(pct_covered, 2), "% du polygone Landiras couvert")
+
+pre_fire_item = pre_fire_items[1]  # celui qui correspond à T30TXQ (100% couverture)
+
+for key, asset in pre_fire_item.assets.items():
+    print(key, "-", asset.href)
+
+import os
+os.environ["TEMP"] = r"C:\temp"
+os.environ["TMP"] = r"C:\temp"
+os.makedirs(r"C:\temp", exist_ok=True)
+
+import rasterio
+
+import os
+
+os.environ["USERPROFILE"] = r"C:\temp"
+os.environ["HOME"] = r"C:\temp"
+os.environ["TEMP"] = r"C:\temp"
+os.environ["TMP"] = r"C:\temp"
+os.environ["GDAL_DATA"] = r"C:\temp\gdal_data"
+os.makedirs(r"C:\temp", exist_ok=True)
+
+os.environ["AWS_ACCESS_KEY_ID"] = "CLZN1E05TUXMT25FJCID"
+os.environ["AWS_SECRET_ACCESS_KEY"] = "UpTldRQnVrsx3bgplVfZQKzHgQzxAa9i576BV0oo"
+os.environ["AWS_S3_ENDPOINT"] = "eodata.dataspace.copernicus.eu"
+os.environ["AWS_VIRTUAL_HOSTING"] = "FALSE"
+os.environ["AWS_HTTPS"] = "TRUE"
+
+url_b8a_pre = "s3://eodata/Sentinel-2/MSI/L2A_N0500/2022/07/02/S2A_MSIL2A_20220702T105631_N0510_R094_T30TXQ_20240701T074946.SAFE/GRANULE/L2A_T30TXQ_A036699_20220702T105925/IMG_DATA/R20m/T30TXQ_20220702T105631_B8A_20m.jp2"
+
+with rasterio.open(url_b8a_pre) as src:
+    print("CRS :", src.crs)
+    print("Dimensions :", src.width, src.height)
+    print("Résolution :", src.res)
