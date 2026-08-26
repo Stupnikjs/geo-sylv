@@ -1,6 +1,12 @@
+"""Logique de retry pour les erreurs transitoires (429, flux JP2 corrompus)."""
+
 import time
+from typing import Any
+
+import pystac_client
 
 
+# Snippets d'erreurs transitoires observées en pratique sur vsis3.
 RETRYABLE_ERROR_SNIPPETS = (
     "429",
     "not recognized as being in a supported file format",
@@ -13,7 +19,7 @@ RETRYABLE_ERROR_SNIPPETS = (
 
 
 def is_rate_limit_error(e: Exception) -> bool:
-    """Détection un peu plus robuste que le seul string-matching sur '429'."""
+    """Détecte un 429 (rate limit) de façon robuste."""
     response = getattr(e, "response", None)
     if response is not None and getattr(response, "status_code", None) == 429:
         return True
@@ -23,10 +29,8 @@ def is_rate_limit_error(e: Exception) -> bool:
 def is_retryable_error(e: Exception) -> bool:
     """
     Élargit is_rate_limit_error aux erreurs de flux JP2 corrompu sous charge
-    (opj_get_decoded_tile, Stream too short, segment too long, format non
-    reconnu) observées en pratique sur vsis3 avec plusieurs threads concurrents.
-    Ces erreurs sont transitoires dans la grande majorité des cas : un retry
-    récupère généralement un flux complet à l'essai suivant.
+    (opj_get_decoded_tile, Stream too short, etc.).
+    Ces erreurs sont transitoires : un retry récupère généralement un flux complet.
     """
     if is_rate_limit_error(e):
         return True
@@ -34,7 +38,13 @@ def is_retryable_error(e: Exception) -> bool:
     return any(snippet in msg for snippet in RETRYABLE_ERROR_SNIPPETS)
 
 
-def search_with_retry(catalog, max_retries=5, base_delay=10, **search_kwargs):
+def search_with_retry(
+    catalog: pystac_client.Client,
+    max_retries: int = 10,
+    base_delay: int = 20,
+    **search_kwargs: Any,
+):
+    """Recherche STAC avec retry sur 429."""
     for attempt in range(max_retries):
         try:
             search = catalog.search(**search_kwargs)
@@ -42,8 +52,11 @@ def search_with_retry(catalog, max_retries=5, base_delay=10, **search_kwargs):
         except Exception as e:
             if is_rate_limit_error(e):
                 delay = base_delay * (2**attempt)
-                print(f"Rate limit, attente {delay}s (tentative {attempt + 1}/{max_retries})")
+                print(
+                    f"  Rate limit, attente {delay}s "
+                    f"(tentative {attempt + 1}/{max_retries})"
+                )
                 time.sleep(delay)
             else:
                 raise
-    raise RuntimeError("Échec après plusieurs tentatives")
+    raise RuntimeError("Échec de la recherche STAC après plusieurs tentatives")
