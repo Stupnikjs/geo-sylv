@@ -13,6 +13,18 @@ from rasterio.mask import mask
 
 from .errors import is_retryable_error
 
+"""
+Le problème venait du fait que la fonction de découpe (rasterio.mask) remplissait par défaut 
+les zones extérieures à votre polygone d'intérêt (mais à l'intérieur du rectangle englobant) avec des zéros. 
+Comme le script considérait ces zéros comme des nuages ou des données invalides (classe 0 de la bande SCL), 
+et que vos parcelles forestières ne couvraient qu'environ 35 % de ce rectangle, 
+le script croyait à tort que 65 % de la zone était nuageuse, 
+ce qui faisait échouer toutes les scènes au seuil de 80 % de pixels valides. 
+La solution a été de configurer la lecture pour renvoyer un tableau masqué (MaskedArray via filled=False), 
+permettant ainsi au calcul de la fraction valide d'ignorer ce vide et de se concentrer uniquement sur les pixels 
+réellement situés à l'intérieur de vos polygones, ce qui débloque enfin le téléchargement des scènes exploitables.
+"""
+
 
 def _read_clipped_one_band(
     url: str,
