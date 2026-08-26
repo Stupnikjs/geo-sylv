@@ -41,7 +41,7 @@ def is_retryable_error(e: Exception) -> bool:
 def search_with_retry(
     catalog: pystac_client.Client,
     max_retries: int = 10,
-    base_delay: int = 20,
+    base_delay: int = 10,
     **search_kwargs: Any,
 ):
     """Recherche STAC avec retry sur 429."""
