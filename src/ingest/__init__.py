@@ -20,7 +20,7 @@ Usage Python:
 """
 
 from .downloader import ingest, DEFAULT_BANDS
-from .manifest import load_manifest, list_scenes, get_band_path, get_scene_dir
+from .manifest import load_manifest, list_scenes, get_band_path, get_scene_dir, get_usable_scenes
 
 __all__ = [
     "ingest",
@@ -29,4 +29,6 @@ __all__ = [
     "list_scenes",
     "get_band_path",
     "get_scene_dir",
+    "get_usable_scenes",
 ]
+
