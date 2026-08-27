@@ -33,7 +33,7 @@ def search_scenes(
     end_date: str,
     max_cloud_cover: int = 60,
     max_retries: int = 5,
-    timeout: int = 10,
+    timeout: int = 30,
 ) -> list:
     """
     Recherche les scènes Sentinel-2 L2A sur une bbox et une période.

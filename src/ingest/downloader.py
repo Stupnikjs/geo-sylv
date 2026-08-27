@@ -162,6 +162,23 @@ def _process_scene(
     return entry
 
 
+
+
+def _rejected_scene_entry(item, scl_results, zone_dir) -> dict:
+    """Construit une entrée manifest pour une scène écartée en Phase 1 (SCL absent ou fraction insuffisante)."""
+    result = scl_results.get(item.id)
+    scene_dir = get_scene_dir(zone_dir, item.id)
+    scl_path = scene_dir / "SCL_20m.tif"
+    return {
+        "id": item.id,
+        "datetime": item.datetime.isoformat() if item.datetime else None,
+        "cloud_cover": item.properties.get("eo:cloud_cover", 0),
+        "valid_fraction": float(result[0]) if result else None,
+        "usable": False,
+        "scene_dir": str(scene_dir.relative_to(zone_dir)),
+        "bands": {"SCL_20m": str(scl_path.relative_to(zone_dir))} if scl_path.exists() else {},
+    }
+
 def ingest(
     geojson_path: str | Path,
     zone_name: str,
@@ -237,7 +254,7 @@ def ingest(
     # Phase 1 : SCL concurrent (filtrage)
     print("\nPhase 1/2 : Filtrage SCL")
     scl_results: dict[str, tuple[float, np.ndarray] | None] = {}
-
+  
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for item in to_process:
@@ -262,6 +279,7 @@ def ingest(
                 scl_results[item.id] = None
 
     # Phase 2 : Bandes pour les scènes exploitables
+    # Phase 2 : Bandes pour les scènes exploitables
     print("\nPhase 2/2 : Téléchargement des bandes")
     usable_items = [
         item
@@ -269,9 +287,15 @@ def ingest(
         if scl_results.get(item.id) is not None
         and scl_results[item.id][0] >= min_valid_fraction
     ]
-    skipped = len(to_process) - len(usable_items)
+    rejected_items = [item for item in to_process if item not in usable_items]
+    skipped = len(rejected_items)
     print(f"{len(usable_items)} scènes exploitables, {skipped} skipées")
 
+    for item in rejected_items:
+        add_scene(manifest, _rejected_scene_entry(item, scl_results, zone_dir))
+    save_manifest(zone_dir, manifest)
+
+    
     for i, item in enumerate(usable_items, 1):
         print(f"\n[{i}/{len(usable_items)}] {item.id}")
 
