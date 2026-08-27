@@ -19,11 +19,12 @@ from .manifest import (
     save_manifest,
 )
 from .raster import (
-    compute_valid_fraction,
-    read_clipped_band,
+    read_or_download_band,   # remplace read_clipped_band + save_band pour ce cas d'usage
     read_clipped_band_safe_and_save,
     save_band,
+    compute_valid_fraction,
 )
+
 from .search import load_aoi, search_scenes
 
 
@@ -48,33 +49,17 @@ MIN_VALID_FRACTION = 0.8
 MAX_CONCURRENT_REQUESTS = 4
 
 
-def _download_scl(
-    item: Any,
-    aoi_geom: Any,
-    aoi_crs: str,
-    scene_dir: Path,
-) -> tuple[float, np.ndarray] | None:
-    """Télécharge SCL, calcule la fraction valide. Retourne None si échec."""
+def _download_scl(item, aoi_geom, aoi_crs, scene_dir):
+    """Télécharge SCL si absent, calcule la fraction valide. Retourne None si échec."""
     if "SCL_20m" not in item.assets:
         print(f"  SKIP {item.id} : pas de SCL_20m dans les assets")
         return None
 
-    scl_url = item.assets["SCL_20m"].href
     scl_path = scene_dir / "SCL_20m.tif"
-
-    # SCL déjà téléchargé ? On le lit depuis le disque.
-    if scl_path.exists():
-        import rasterio
-        with rasterio.open(scl_path) as src:
-            scl = src.read(1)
-    else:
-        array, profile = read_clipped_band(scl_url, aoi_geom, aoi_crs)
-        save_band(array, profile, scl_path)
-        scl = array
-
-    valid_fraction, invalid_mask = compute_valid_fraction(scl)
-    return valid_fraction, invalid_mask
-
+    scl_data, outside_mask = read_or_download_band(
+        item.assets["SCL_20m"].href, aoi_geom, aoi_crs, scl_path
+    )
+    return compute_valid_fraction(scl_data, outside_mask)
 
 def _download_scene_bands(
     item: Any,

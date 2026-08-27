@@ -33,6 +33,7 @@ def search_scenes(
     end_date: str,
     max_cloud_cover: int = 60,
     max_retries: int = 5,
+    timeout: int = 10,
 ) -> list:
     """
     Recherche les scènes Sentinel-2 L2A sur une bbox et une période.
@@ -40,7 +41,7 @@ def search_scenes(
     Pré-filtre sur eo:cloud_cover (métadonnée, zéro téléchargement).
     Retourne une liste d'items pystac triés par date.
     """
-    catalog = pystac_client.Client.open(STAC_URL)
+    catalog = pystac_client.Client.open(STAC_URL, timeout=timeout)
 
     items = search_with_retry(
         catalog,

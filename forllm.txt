@@ -1,0 +1,922 @@
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : __init__.py
+# Chemin relatif : ingest/__init__.py
+################################################################################
+
+"""
+Package ingest : téléchargement local des bandes Sentinel-2 L2A.
+
+Télécharge toutes les bandes demandées pour chaque scène exploitable,
+découpées sur l'AOI, et les sauvegarde en GeoTIFF local.
+Un manifest.json garde la trace de ce qui a été téléchargé.
+
+Usage CLI:
+    python -m ingest --geojson zone.geojson --zone chambord \
+        --start 2017-01-01 --end 2023-12-31
+
+Usage Python:
+    from ingest import ingest
+    manifest = ingest(
+        geojson_path="zone.geojson",
+        zone_name="chambord",
+        start_date="2017-01-01",
+        end_date="2023-12-31",
+    )
+"""
+
+from .downloader import ingest, DEFAULT_BANDS
+from .manifest import load_manifest, list_scenes, get_band_path, get_scene_dir
+
+__all__ = [
+    "ingest",
+    "DEFAULT_BANDS",
+    "load_manifest",
+    "list_scenes",
+    "get_band_path",
+    "get_scene_dir",
+]
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : __main__.py
+# Chemin relatif : ingest/__main__.py
+################################################################################
+
+"""Entry point: python -m ingest --geojson ... --zone ..."""
+
+from .cli import main
+
+if __name__ == "__main__":
+    main()
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : cli.py
+# Chemin relatif : ingest/cli.py
+################################################################################
+
+"""Interface en ligne de commande pour le package ingest."""
+
+import argparse
+
+from .downloader import DEFAULT_BANDS, ingest
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="ingest",
+        description=(
+            "Télécharge les bandes Sentinel-2 L2A pour une AOI et une période. "
+            "Les bandes sont découpées sur l'AOI et sauvegardées localement en GeoTIFF. "
+            "Un manifest.json liste toutes les scènes téléchargées."
+        ),
+    )
+    parser.add_argument(
+        "--geojson",
+        required=True,
+        help="Chemin vers le GeoJSON de l'AOI.",
+    )
+    parser.add_argument(
+        "--zone",
+        required=True,
+        help="Nom court de la zone (ex: chambord, vosges).",
+    )
+    parser.add_argument(
+        "--start",
+        default="2017-01-01",
+        help="Date de début YYYY-MM-DD (défaut: 2017-01-01).",
+    )
+    parser.add_argument(
+        "--end",
+        default="2023-12-31",
+        help="Date de fin YYYY-MM-DD (défaut: 2023-12-31).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="./data",
+        help="Dossier de sortie (défaut: ./data).",
+    )
+    parser.add_argument(
+        "--bands",
+        nargs="+",
+        default=None,
+        help=(
+            f"Bandes à télécharger (défaut: {' '.join(DEFAULT_BANDS)}). "
+            "Ex: --bands B08_10m B04_10m SCL_20m"
+        ),
+    )
+    parser.add_argument(
+        "--max-cloud-cover",
+        type=int,
+        default=60,
+        help="Cloud cover max sur la scène entière (défaut: 60).",
+    )
+    parser.add_argument(
+        "--min-valid-fraction",
+        type=float,
+        default=0.8,
+        help="Fraction min de pixels valides SCL (défaut: 0.8).",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="Téléchargements simultanés (défaut: 4).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-télécharge même les scènes déjà présentes.",
+    )
+
+    args = parser.parse_args()
+
+    ingest(
+        geojson_path=args.geojson,
+        zone_name=args.zone,
+        start_date=args.start,
+        end_date=args.end,
+        output_dir=args.output_dir,
+        bands=args.bands,
+        max_cloud_cover=args.max_cloud_cover,
+        min_valid_fraction=args.min_valid_fraction,
+        max_workers=args.max_workers,
+        skip_existing=not args.force,
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : config.py
+# Chemin relatif : ingest/config.py
+################################################################################
+
+"""Configuration : variables d'environnement pour l'accès S3 Copernicus."""
+
+import os
+from pathlib import Path
+
+# --- Credentials Copernicus EO DataSpace (S3) ---
+_S3_ACCESS_KEY = "CLZN1E05TUXMT25FJCID"
+_S3_SECRET_KEY = "UpTldRQnVrsx3bgplVfZQKzHgQzxAa9i576BV0oo"
+_S3_ENDPOINT = "eodata.dataspace.copernicus.eu"
+
+# --- Catalogue STAC ---
+STAC_URL = "https://catalogue.dataspace.copernicus.eu/stac"
+
+# --- Collection Sentinel-2 L2A ---
+COLLECTION = "sentinel-2-l2a"
+
+
+def load_env():
+    """Configure les variables d'environnement pour vsis3 / rasterio."""
+    os.environ["AWS_ACCESS_KEY_ID"] = _S3_ACCESS_KEY
+    os.environ["AWS_SECRET_ACCESS_KEY"] = _S3_SECRET_KEY
+    os.environ["AWS_S3_ENDPOINT"] = _S3_ENDPOINT
+    os.environ["AWS_VIRTUAL_HOSTING"] = "FALSE"
+    os.environ["AWS_HTTPS"] = "TRUE"
+
+
+def load_windows_env():
+    """Workaround pour Windows : force des chemins temp valides pour GDAL."""
+    if os.name != "nt":
+        return
+    temp = Path(r"C:\temp")
+    temp.mkdir(parents=True, exist_ok=True)
+    (temp / "gdal_data").mkdir(exist_ok=True)
+    os.environ["USERPROFILE"] = str(temp)
+    os.environ["HOME"] = str(temp)
+    os.environ["TEMP"] = str(temp)
+    os.environ["TMP"] = str(temp)
+    os.environ["GDAL_DATA"] = str(temp / "gdal_data")
+
+
+def setup():
+    """À appeler une fois au démarrage, avant tout accès réseau."""
+    load_windows_env()
+    load_env()
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : downloader.py
+# Chemin relatif : ingest/downloader.py
+################################################################################
+
+"""
+Orchestration principale : recherche → filtrage SCL → téléchargement des bandes.
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from .config import setup
+from .manifest import (
+    add_scene,
+    create_manifest,
+    get_scene_dir,
+    load_manifest,
+    save_manifest,
+)
+from .raster import (
+    compute_valid_fraction,
+    read_clipped_band,
+    read_clipped_band_safe_and_save,
+    save_band,
+)
+from .search import load_aoi, search_scenes
+
+
+# --- Bandes Sentinel-2 L2A téléchargées par défaut ---
+DEFAULT_BANDS = [
+    "B02_10m",
+    "B03_10m",
+    "B04_10m",
+    "B08_10m",    # 10m : RVB + NIR
+    "B05_20m",
+    "B06_20m",
+    "B07_20m",
+    "B8A_20m",    # 20m : red edge + NIR étroit
+    "B11_20m",
+    "B12_20m",    # 20m : SWIR
+    "SCL_20m",    # 20m : classification de scène
+]
+
+# --- Paramètres de filtrage ---
+MAX_CLOUD_COVER_SCENE = 60
+MIN_VALID_FRACTION = 0.8
+MAX_CONCURRENT_REQUESTS = 4
+
+
+def _download_scl(
+    item: Any,
+    aoi_geom: Any,
+    aoi_crs: str,
+    scene_dir: Path,
+) -> tuple[float, np.ndarray] | None:
+    """Télécharge SCL, calcule la fraction valide. Retourne None si échec."""
+    if "SCL_20m" not in item.assets:
+        print(f"  SKIP {item.id} : pas de SCL_20m dans les assets")
+        return None
+
+    scl_url = item.assets["SCL_20m"].href
+    scl_path = scene_dir / "SCL_20m.tif"
+
+    # SCL déjà téléchargé ? On le lit depuis le disque.
+    if scl_path.exists():
+        import rasterio
+        with rasterio.open(scl_path) as src:
+            scl = src.read(1)
+    else:
+        array, profile = read_clipped_band(scl_url, aoi_geom, aoi_crs)
+        save_band(array, profile, scl_path)
+        scl = array
+
+    valid_fraction, invalid_mask = compute_valid_fraction(scl)
+    return valid_fraction, invalid_mask
+
+
+def _download_scene_bands(
+    item: Any,
+    aoi_geom: Any,
+    aoi_crs: str,
+    scene_dir: Path,
+    bands: list[str],
+    max_retries: int = 3,
+) -> dict[str, str]:
+    """
+    Télécharge toutes les bandes demandées pour une scène.
+    Retourne un dict {band_name: relative_path}.
+    """
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    downloaded = {}
+
+    for band_name in bands:
+        if band_name not in item.assets:
+            print(f"    {band_name} : absent des assets, skip")
+            continue
+
+        url = item.assets[band_name].href
+        band_path = scene_dir / f"{band_name}.tif"
+
+        try:
+            written = read_clipped_band_safe_and_save(
+                url, aoi_geom, aoi_crs, band_path, max_retries
+            )
+            if written:
+                print(f"    {band_name} : téléchargé")
+            else:
+                print(f"    {band_name} : déjà présent")
+            downloaded[band_name] = str(band_path.relative_to(scene_dir.parent.parent))
+        except Exception as e:
+            print(f"    {band_name} : ÉCHEC ({e})")
+
+    return downloaded
+
+
+def _process_scene(
+    item: Any,
+    aoi_geom: Any,
+    aoi_crs: str,
+    zone_dir: Path,
+    bands: list[str],
+    min_valid_fraction: float,
+    max_retries: int,
+) -> dict:
+    """
+    Traite une scène : télécharge SCL → filtre → télécharge les bandes.
+    Retourne une entrée de manifeste pour cette scène.
+    """
+    scene_dir = get_scene_dir(zone_dir, item.id)
+    scene_dir.mkdir(parents=True, exist_ok=True)
+
+    entry = {
+        "id": item.id,
+        "datetime": item.datetime.isoformat() if item.datetime else None,
+        "cloud_cover": item.properties.get("eo:cloud_cover", 0),
+        "valid_fraction": None,
+        "usable": False,
+        "scene_dir": str(scene_dir.relative_to(zone_dir)),
+        "bands": {},
+    }
+
+    # --- Phase 1 : SCL ---
+    try:
+        result = _download_scl(item, aoi_geom, aoi_crs, scene_dir)
+        if result is None:
+            entry["usable"] = False
+            return entry
+        valid_fraction, _ = result
+        entry["valid_fraction"] = float(valid_fraction)
+    except Exception as e:
+        print(f"  SKIP {item.id} (SCL) : {e}")
+        entry["usable"] = False
+        return entry
+
+    if valid_fraction < min_valid_fraction:
+        print(
+            f"  SKIP {item.id} : fraction valide {valid_fraction:.2%} "
+            f"< seuil {min_valid_fraction:.0%}"
+        )
+        entry["usable"] = False
+        return entry
+
+    entry["usable"] = True
+    print(f"  OK {item.id} : fraction valide {valid_fraction:.2%}")
+
+    # --- Phase 2 : toutes les autres bandes ---
+    bands_to_download = [b for b in bands if b != "SCL_20m"]
+    downloaded = _download_scene_bands(
+        item, aoi_geom, aoi_crs, scene_dir, bands_to_download, max_retries
+    )
+
+    scl_rel = str((scene_dir / "SCL_20m.tif").relative_to(zone_dir))
+    downloaded["SCL_20m"] = scl_rel
+    entry["bands"] = downloaded
+
+    return entry
+
+
+def ingest(
+    geojson_path: str | Path,
+    zone_name: str,
+    start_date: str = "2017-01-01",
+    end_date: str = "2023-12-31",
+    output_dir: str | Path = "./data",
+    bands: list[str] | None = None,
+    max_cloud_cover: int = MAX_CLOUD_COVER_SCENE,
+    min_valid_fraction: float = MIN_VALID_FRACTION,
+    max_workers: int = MAX_CONCURRENT_REQUESTS,
+    max_retries: int = 3,
+    skip_existing: bool = True,
+) -> dict:
+    """
+    Télécharge toutes les bandes Sentinel-2 L2A pour une AOI et une période.
+    """
+    if bands is None:
+        bands = DEFAULT_BANDS
+
+    # 1. Setup environnement
+    setup()
+
+    # 2. Charger l'AOI
+    aoi_geom, bbox, area_ha = load_aoi(geojson_path)
+    print(f"Zone : {zone_name}")
+    print(f"Bbox : {bbox}")
+    print(f"Aire : {area_ha:.1f} ha")
+    print(f"Période : {start_date} → {end_date}")
+    print(f"Bandes : {', '.join(bands)}")
+
+    # 3. Préparer le dossier de zone et le manifeste
+    zone_dir = Path(output_dir) / zone_name
+    zone_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = load_manifest(zone_dir)
+    if manifest is None:
+        manifest = create_manifest(
+            zone_name=zone_name,
+            geojson_path=str(geojson_path),
+            start_date=start_date,
+            end_date=end_date,
+            bands=bands,
+            aoi_crs="EPSG:4326",
+            aoi_bounds=bbox,
+            area_ha=area_ha,
+        )
+        save_manifest(zone_dir, manifest)
+        print(f"Manifeste créé : {zone_dir / 'manifest.json'}")
+    else:
+        print(f"Manifeste existant chargé ({len(manifest.get('scenes', []))} scènes)")
+
+    # 4. Recherche STAC
+    print("\n--- Recherche des scènes ---")
+    items = search_scenes(bbox, start_date, end_date, max_cloud_cover)
+    print(f"{len(items)} scènes trouvées (cloud_cover <= {max_cloud_cover}%)")
+
+    # 5. Filtrer les scènes déjà traitées
+    existing_ids = {s["id"] for s in manifest.get("scenes", [])}
+    if skip_existing:
+        to_process = [item for item in items if item.id not in existing_ids]
+        print(f"{len(to_process)} nouvelles scènes à traiter "
+              f"({len(items) - len(to_process)} déjà présentes)")
+    else:
+        to_process = items
+
+    if not to_process:
+        print("Rien à télécharger.")
+        return manifest
+
+    # 6. Traitement scène par scène
+    print(f"\n--- Téléchargement ({max_workers} workers concurrents pour SCL) ---")
+
+    # Phase 1 : SCL concurrent (filtrage)
+    print("\nPhase 1/2 : Filtrage SCL")
+    scl_results: dict[str, tuple[float, np.ndarray] | None] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for item in to_process:
+            scene_dir = get_scene_dir(zone_dir, item.id)
+            future = executor.submit(
+                _download_scl, item, aoi_geom, "EPSG:4326", scene_dir
+            )
+            futures[future] = item
+
+        for future in as_completed(futures):
+            item = futures[future]
+            try:
+                result = future.result()
+                scl_results[item.id] = result
+                if result is not None:
+                    frac = result[0]
+                    print(f"  {item.id} : fraction valide {frac:.2%}")
+                else:
+                    print(f"  {item.id} : SCL indisponible")
+            except Exception as e:
+                print(f"  {item.id} : ÉCHEC SCL ({e})")
+                scl_results[item.id] = None
+
+    # Phase 2 : Bandes pour les scènes exploitables
+    print("\nPhase 2/2 : Téléchargement des bandes")
+    usable_items = [
+        item
+        for item in to_process
+        if scl_results.get(item.id) is not None
+        and scl_results[item.id][0] >= min_valid_fraction
+    ]
+    skipped = len(to_process) - len(usable_items)
+    print(f"{len(usable_items)} scènes exploitables, {skipped} skipées")
+
+    for i, item in enumerate(usable_items, 1):
+        print(f"\n[{i}/{len(usable_items)}] {item.id}")
+
+        entry = _process_scene(
+            item=item,
+            aoi_geom=aoi_geom,
+            aoi_crs="EPSG:4326",
+            zone_dir=zone_dir,
+            bands=bands,
+            min_valid_fraction=min_valid_fraction,
+            max_retries=max_retries,
+        )
+
+        add_scene(manifest, entry)
+        save_manifest(zone_dir, manifest)
+
+    # 7. Résumé final
+    all_scenes = manifest.get("scenes", [])
+    usable = [s for s in all_scenes if s.get("usable")]
+    print("\n" + "=" * 70)
+    print("RÉSUMÉ")
+    print("=" * 70)
+    print(f"  Zone         : {zone_name}")
+    print(f"  Période      : {start_date} → {end_date}")
+    print(f"  Scènes totales     : {len(all_scenes)}")
+    print(f"  Scènes exploitables : {len(usable)}")
+    print(f"  Manifeste    : {zone_dir / 'manifest.json'}")
+    print(f"  Données      : {zone_dir / 'scenes'}")
+
+    return manifest
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : errors.py
+# Chemin relatif : ingest/errors.py
+################################################################################
+
+"""Logique de retry pour les erreurs transitoires (429, flux JP2 corrompus)."""
+
+import time
+from typing import Any
+
+import pystac_client
+
+
+# Snippets d'erreurs transitoires observées en pratique sur vsis3.
+RETRYABLE_ERROR_SNIPPETS = (
+    "429",
+    "not recognized as being in a supported file format",
+    "opj_get_decoded_tile",
+    "stream too short",
+    "failed to decode",
+    "read failed",
+    "segment too long",
+)
+
+
+def is_rate_limit_error(e: Exception) -> bool:
+    """Détecte un 429 (rate limit) de façon robuste."""
+    response = getattr(e, "response", None)
+    if response is not None and getattr(response, "status_code", None) == 429:
+        return True
+    return "429" in str(e)
+
+
+def is_retryable_error(e: Exception) -> bool:
+    """
+    Élargit is_rate_limit_error aux erreurs de flux JP2 corrompu sous charge
+    (opj_get_decoded_tile, Stream too short, etc.).
+    Ces erreurs sont transitoires : un retry récupère généralement un flux complet.
+    """
+    if is_rate_limit_error(e):
+        return True
+    msg = str(e).lower()
+    return any(snippet in msg for snippet in RETRYABLE_ERROR_SNIPPETS)
+
+
+def search_with_retry(
+    catalog: pystac_client.Client,
+    max_retries: int = 10,
+    base_delay: int = 10,
+    **search_kwargs: Any,
+):
+    """Recherche STAC avec retry sur 429."""
+    for attempt in range(max_retries):
+        try:
+            search = catalog.search(**search_kwargs)
+            return list(search.items())
+        except Exception as e:
+            if is_rate_limit_error(e):
+                delay = base_delay * (2**attempt)
+                print(
+                    f"  Rate limit, attente {delay}s "
+                    f"(tentative {attempt + 1}/{max_retries})"
+                )
+                time.sleep(delay)
+            else:
+                raise
+    raise RuntimeError("Échec de la recherche STAC après plusieurs tentatives")
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : manifest.py
+# Chemin relatif : ingest/manifest.py
+################################################################################
+
+"""
+Manifeste JSON : registre des scènes téléchargées.
+
+C'est le seul point d'interface entre `ingest` et les packages en aval
+(indices, visu). Tout ce qu'il faut pour travailler en local s'y trouve.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+def _manifest_path(zone_dir: str | Path) -> Path:
+    return Path(zone_dir) / "manifest.json"
+
+
+def _scenes_dir(zone_dir: str | Path) -> Path:
+    return Path(zone_dir) / "scenes"
+
+
+def get_scene_dir(zone_dir: str | Path, scene_id: str) -> Path:
+    """Retourne le chemin vers le dossier d'une scène."""
+    return _scenes_dir(zone_dir) / scene_id
+
+
+def load_manifest(zone_dir: str | Path) -> dict | None:
+    """Charge le manifeste JSON. Retourne None s'il n'existe pas."""
+    f = _manifest_path(zone_dir)
+    if not f.exists():
+        return None
+    with open(f, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save_manifest(zone_dir: str | Path, manifest: dict) -> None:
+    """Sauvegarde le manifeste en JSON (indenté, lisible)."""
+    Path(zone_dir).mkdir(parents=True, exist_ok=True)
+    f = _manifest_path(zone_dir)
+    with open(f, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2, ensure_ascii=False, default=str)
+
+
+def create_manifest(
+    zone_name: str,
+    geojson_path: str,
+    start_date: str,
+    end_date: str,
+    bands: list[str],
+    aoi_crs: str = "EPSG:4326",
+    aoi_bounds: list[float] | None = None,
+    area_ha: float | None = None,
+) -> dict:
+    """Crée un manifeste vide."""
+    return {
+        "zone_name": zone_name,
+        "geojson_path": str(geojson_path),
+        "start_date": start_date,
+        "end_date": end_date,
+        "aoi_crs": aoi_crs,
+        "aoi_bounds": aoi_bounds,
+        "area_ha": area_ha,
+        "bands": bands,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "scenes": [],
+    }
+
+
+def add_scene(manifest: dict, scene_entry: dict) -> dict:
+    """Ajoute ou remplace une scène dans le manifeste."""
+    scenes = manifest.get("scenes", [])
+    # Remplace si déjà présent (même id)
+    scenes = [s for s in scenes if s["id"] != scene_entry["id"]]
+    scenes.append(scene_entry)
+    scenes.sort(key=lambda s: s["datetime"])
+    manifest["scenes"] = scenes
+    return manifest
+
+
+def list_scenes(manifest: dict) -> list[dict]:
+    """Retourne la liste des scènes du manifeste."""
+    return manifest.get("scenes", [])
+
+
+def get_band_path(scene_entry: dict, band_name: str) -> Path | None:
+    """
+    Retourne le chemin vers un fichier de bande pour une scène donnée.
+    None si la bande n'est pas disponible.
+    """
+    bands = scene_entry.get("bands", {})
+    path_str = bands.get(band_name)
+    if path_str is None:
+        return None
+    return Path(path_str)
+
+
+def get_usable_scenes(manifest: dict) -> list[dict]:
+    """Retourne uniquement les scènes exploitables (valid_fraction > seuil)."""
+    return [s for s in list_scenes(manifest) if s.get("usable", False)]
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : raster.py
+# Chemin relatif : ingest/raster.py
+################################################################################
+
+"""Lecture, découpe et sauvegarde des bandes raster Sentinel-2."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any
+
+import geopandas as gpd
+import numpy as np
+import rasterio
+from rasterio.mask import mask
+
+from .errors import is_retryable_error
+
+"""
+Le problème venait du fait que la fonction de découpe (rasterio.mask) remplissait par défaut 
+les zones extérieures à votre polygone d'intérêt (mais à l'intérieur du rectangle englobant) avec des zéros. 
+Comme le script considérait ces zéros comme des nuages ou des données invalides (classe 0 de la bande SCL), 
+et que vos parcelles forestières ne couvraient qu'environ 35 % de ce rectangle, 
+le script croyait à tort que 65 % de la zone était nuageuse, 
+ce qui faisait échouer toutes les scènes au seuil de 80 % de pixels valides. 
+La solution a été de configurer la lecture pour renvoyer un tableau masqué (MaskedArray via filled=False), 
+permettant ainsi au calcul de la fraction valide d'ignorer ce vide et de se concentrer uniquement sur les pixels 
+réellement situés à l'intérieur de vos polygones, ce qui débloque enfin le téléchargement des scènes exploitables.
+"""
+
+
+def _read_clipped_one_band(
+    url: str,
+    aoi_geom: Any,
+    aoi_crs: str = "EPSG:4326",
+) -> tuple[np.ndarray, dict]:
+    """
+    Lit une bande depuis une URL, la découpe sur l'AOI.
+
+    Retourne (array_2d, profile) où profile contient CRS, transform, dtype.
+    Lève une ValueError si la lecture semble corrompue (pas de CRS, bande vide).
+    """
+    with rasterio.Env(GDAL_HTTP_MULTIPLEX="NO", VSI_CACHE="FALSE"):
+        with rasterio.open(url) as src:
+            if src.crs is None:
+                raise ValueError(
+                    f"Raster sans CRS (lecture probablement corrompue) : {url}"
+                )
+
+            aoi_proj = gpd.GeoSeries([aoi_geom], crs=aoi_crs).to_crs(src.crs)
+            geom = [aoi_proj.iloc[0].__geo_interface__]
+            out_image, out_transform = mask(src, geom, crop=True)
+
+            if out_image.shape[0] != 1:
+                raise ValueError(
+                    f"Attendu 1 bande, obtenu {out_image.shape[0]} pour {url}"
+                )
+            if out_image.size == 0:
+                raise ValueError(f"AOI hors de l'étendue du raster pour {url}")
+
+            # Profile pour sauvegarde : on garde le dtype d'origine.
+            profile = src.profile.copy()
+            profile.update(
+                {
+                    "height": out_image.shape[1],
+                    "width": out_image.shape[2],
+                    "transform": out_transform,
+                    "count": 1,
+                    "compress": "lzw",
+                    "tiled": True,
+                }
+            )
+
+    return out_image[0], profile
+
+
+def read_clipped_band(
+    url: str,
+    aoi_geom: Any,
+    aoi_crs: str = "EPSG:4326",
+    max_retries: int = 3,
+) -> tuple[np.ndarray, dict]:
+    """Lit et découpe une bande avec retry sur erreurs transitoires."""
+    for attempt in range(max_retries):
+        try:
+            return _read_clipped_one_band(url, aoi_geom, aoi_crs)
+        except Exception as e:
+            if is_retryable_error(e):
+                delay = 5 * (2**attempt)
+                print(
+                    f"  Erreur transitoire ({type(e).__name__}), "
+                    f"attente {delay}s (tentative {attempt + 1}/{max_retries})..."
+                )
+                time.sleep(delay)
+            else:
+                raise
+    raise RuntimeError(f"Échec de lecture après {max_retries} tentatives : {url}")
+
+
+def save_band(array: np.ndarray, profile: dict, output_path: Path) -> None:
+    """Sauvegarde un tableau 2D en GeoTIFF (LZW compressé)."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with rasterio.open(output_path, "w", **profile) as dst:
+        dst.write(array, 1)
+
+
+def read_clipped_band_safe_and_save(
+    url: str,
+    aoi_geom: Any,
+    aoi_crs: str,
+    output_path: Path,
+    max_retries: int = 3,
+) -> bool:
+    """
+    Lit une bande depuis une URL, la découpe sur l'AOI et la sauvegarde localement.
+
+    Retourne True si le fichier a été écrit, False s'il existait déjà (skip).
+    """
+    output_path = Path(output_path)
+    if output_path.exists():
+        return False
+
+    array, profile = read_clipped_band(url, aoi_geom, aoi_crs, max_retries)
+    save_band(array, profile, output_path)
+    return True
+
+
+# --- Classes SCL pour le calcul de fraction valide ---
+CLOUD_CLASSES = (0, 1, 3, 8, 9, 10, 11)
+
+
+def compute_valid_fraction(
+    scl_array: np.ndarray,
+    cloud_classes: tuple = CLOUD_CLASSES,
+) -> tuple[float, np.ndarray]:
+    """
+    Calcule la fraction de pixels valides à partir de la bande SCL.
+
+    Retourne (valid_fraction, invalid_mask).
+    """
+    invalid = np.isin(scl_array, cloud_classes)
+    valid_fraction = 1.0 - (invalid.sum() / scl_array.size)
+    return valid_fraction, invalid
+
+################################################################################
+# Dossier : src/ingest
+# Fichier : search.py
+# Chemin relatif : ingest/search.py
+################################################################################
+
+"""Recherche de scènes Sentinel-2 via le catalogue STAC Copernicus."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import geopandas as gpd
+import pystac_client
+
+from .config import COLLECTION, STAC_URL
+from .errors import search_with_retry
+
+
+def load_aoi(geojson_path: str) -> tuple[Any, list[float], float]:
+    """
+    Charge un GeoJSON et retourne :
+    - aoi_geom : géométrie fusionnée (union) en EPSG:4326
+    - bbox : [min_lon, min_lat, max_lon, max_lat]
+    - area_ha : surface en hectares ( reprojetée en EPSG:2154)
+    """
+    zone = gpd.read_file(geojson_path).to_crs(epsg=4326)
+    aoi_geom = zone.geometry.union_all()
+    bbox = list(aoi_geom.bounds)
+    area_ha = (
+        gpd.GeoSeries([aoi_geom], crs=4326).to_crs(epsg=2154).area.iloc[0] / 10_000.0
+    )
+    return aoi_geom, bbox, area_ha
+
+
+def search_scenes(
+    bbox: list[float],
+    start_date: str,
+    end_date: str,
+    max_cloud_cover: int = 60,
+    max_retries: int = 5,
+) -> list:
+    """
+    Recherche les scènes Sentinel-2 L2A sur une bbox et une période.
+
+    Pré-filtre sur eo:cloud_cover (métadonnée, zéro téléchargement).
+    Retourne une liste d'items pystac triés par date.
+    """
+    catalog = pystac_client.Client.open(STAC_URL)
+
+    items = search_with_retry(
+        catalog,
+        max_retries=max_retries,
+        collections=[COLLECTION],
+        bbox=bbox,
+        datetime=f"{start_date}/{end_date}",
+    )
+
+    # Pré-filtre cloud_cover
+    items = [
+        item
+        for item in items
+        if item.properties.get("eo:cloud_cover", 0) <= max_cloud_cover
+    ]
+
+    items = sorted(items, key=lambda i: i.datetime)
+    return items

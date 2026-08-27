@@ -51,6 +51,6 @@ def concatener(src_dir: str, output_file: str) -> None:
 
 
 if __name__ == "__main__":
-    dossier_src = sys.argv[1] if len(sys.argv) > 1 else "/src"
+    dossier_src = sys.argv[1] if len(sys.argv) > 1 else "src"
     fichier_sortie = sys.argv[2] if len(sys.argv) > 2 else "forllm.txt"
     concatener(dossier_src, fichier_sortie)
