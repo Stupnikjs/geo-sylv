@@ -24,7 +24,7 @@ def concatener(src_dir: str, output_file: str) -> None:
     fichiers_py = []
     for racine, dossiers, fichiers in os.walk(src_dir):
         for nom in sorted(fichiers):
-            if nom.endswith(".py"):
+            if nom.endswith(".py") or nom.endswith(".ipynb"):
                 chemin_complet = os.path.join(racine, nom)
                 fichiers_py.append(chemin_complet)
 
